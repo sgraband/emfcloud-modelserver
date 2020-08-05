@@ -21,13 +21,17 @@ import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 import org.apache.log4j.Logger;
+import org.eclipse.emf.common.util.BasicDiagnostic;
 import org.eclipse.emf.ecore.EObject;
-import org.jetbrains.annotations.Nullable;
-import org.jetbrains.annotations.TestOnly;
-
+import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emfcloud.modelserver.command.CCommand;
 import org.eclipse.emfcloud.modelserver.common.codecs.EncodingException;
 import org.eclipse.emfcloud.modelserver.emf.common.codecs.Codecs;
+import org.emfjson.jackson.module.EMFModule;
+import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.TestOnly;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.google.common.collect.Maps;
 import com.google.inject.Inject;
@@ -40,6 +44,10 @@ public class SessionController extends WsHandler {
    private static Logger LOG = Logger.getLogger(SessionController.class.getSimpleName());
 
    private final Map<String, Set<WsContext>> modelUrisToClients = Maps.newConcurrentMap();
+
+   private final Map<String, Set<WsContext>> modelUrisToClientsValidation = Maps.newConcurrentMap();
+
+   private final Map<String, BasicDiagnostic> modelUriToLastSendDiagnostic = Maps.newConcurrentMap();
 
    @Inject
    private ModelRepository modelRepository;
@@ -56,7 +64,16 @@ public class SessionController extends WsHandler {
    public boolean subscribe(final WsContext ctx, final String modeluri) {
       if (this.modelRepository.hasModel(modeluri)) {
          modelUrisToClients.computeIfAbsent(modeluri, clients -> ConcurrentHashMap.newKeySet()).add(ctx);
-         ctx.send(JsonResponse.success(ctx.getSessionId()));
+         ctx.send(JsonResponse.success(ctx.getSessionId() + "/Changes"));
+         return true;
+      }
+      return false;
+   }
+
+   public boolean subscribeToValidation(final WsContext ctx, final String modeluri) {
+      if (this.modelRepository.hasModel(modeluri)) {
+         modelUrisToClientsValidation.computeIfAbsent(modeluri, clients -> ConcurrentHashMap.newKeySet()).add(ctx);
+         ctx.send(JsonResponse.success(ctx.getSessionId() + "/Validation"));
          return true;
       }
       return false;
@@ -81,11 +98,31 @@ public class SessionController extends WsHandler {
       return true;
    }
 
+   public boolean unsubscribeToValidation(final WsContext ctx) {
+      if (!this.isClientSubscribed(ctx)) {
+         return false;
+      }
+
+      Iterator<Map.Entry<String, Set<WsContext>>> it = modelUrisToClientsValidation.entrySet().iterator();
+
+      while (it.hasNext()) {
+         Map.Entry<String, Set<WsContext>> entry = it.next();
+         Set<WsContext> clients = entry.getValue();
+         clients.remove(ctx);
+         if (clients.isEmpty()) {
+            it.remove();
+         }
+      }
+
+      return true;
+   }
+
    public void modelChanged(final String modeluri) {
       modelRepository.getModel(modeluri).ifPresentOrElse(
          eObject -> {
             broadcastFullUpdate(modeluri, eObject);
             broadcastDirtyState(modeluri, true);
+            broadcastValidationResult(modeluri);
          },
          () -> broadcastError(modeluri, "Could not load changed object"));
    }
@@ -95,6 +132,7 @@ public class SessionController extends WsHandler {
          eObject -> {
             broadcastIncrementalUpdate(modeluri, command);
             broadcastDirtyState(modeluri, true);
+            broadcastValidationResult(modeluri);
          },
          () -> broadcastError(modeluri, "Could not load changed object"));
    }
@@ -109,6 +147,11 @@ public class SessionController extends WsHandler {
 
    private Stream<WsContext> getOpenSessions(final String modeluri) {
       return modelUrisToClients.getOrDefault(modeluri, Collections.emptySet()).stream()
+         .filter(isOpenPredicate);
+   }
+
+   private Stream<WsContext> getOpenValidationSessions(final String modeluri) {
+      return modelUrisToClientsValidation.getOrDefault(modeluri, Collections.emptySet()).stream()
          .filter(isOpenPredicate);
    }
 
@@ -146,6 +189,28 @@ public class SessionController extends WsHandler {
    private void broadcastDirtyState(final String modeluri, final Boolean isDirty) {
       getOpenSessions(modeluri)
          .forEach(session -> session.send(JsonResponse.dirtyState(isDirty)));
+   }
+
+   private void broadcastValidationResult(final String modeluri) {
+      ObjectMapper mapper = EMFModule.setupDefaultMapper();
+      BasicDiagnostic newResult = this.modelRepository.getValidationResult();
+      Resource res = this.modelRepository.loadResource(modeluri).get();
+      if (modelUrisToClientsValidation.containsKey(modeluri)) {
+         getOpenValidationSessions(modeluri)
+            .forEach(session -> {
+               if (!modelUriToLastSendDiagnostic.containsKey(modeluri)) {
+                  modelUriToLastSendDiagnostic.put(modeluri, newResult);
+                  session.send(JsonResponse
+                     .validationResult(mapper.valueToTree(this.modelRepository.diagnosticToJSON(newResult, res))));
+               } else {
+                  if (!modelUriToLastSendDiagnostic.get(modeluri).getChildren().equals(newResult.getChildren())) {
+                     modelUriToLastSendDiagnostic.replace(modeluri, newResult);
+                     session.send(JsonResponse
+                        .validationResult(mapper.valueToTree(this.modelRepository.diagnosticToJSON(newResult, res))));
+                  }
+               }
+            });
+      }
    }
 
    private void broadcastError(final String modeluri, final String errorMessage) {

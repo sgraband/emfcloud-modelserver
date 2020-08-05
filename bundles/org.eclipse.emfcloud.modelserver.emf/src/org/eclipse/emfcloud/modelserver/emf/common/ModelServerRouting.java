@@ -121,6 +121,24 @@ public class ModelServerRouting extends Routing {
                      () -> handleHttpError(ctx, 400, "Missing parameter 'modeluri'!"));
             });
 
+            // VALIDATE
+            get(ModelServerPaths.VALIDATION, ctx -> {
+               getQueryParam(ctx.queryParamMap(), "modeluri")
+                  .map(this::adaptModelUri)
+                  .ifPresentOrElse(
+                     param -> getController(ModelController.class).validate(ctx, param),
+                     () -> handleHttpError(ctx, 400, "Missing parameter 'modeluri'!"));
+            });
+
+            // GET CONSTRAINTS
+            get(ModelServerPaths.VALIDATION_CONSTRAINTS, ctx -> {
+               getQueryParam(ctx.queryParamMap(), "modeluri")
+                  .map(this::adaptModelUri)
+                  .ifPresentOrElse(
+                     param -> getController(ModelController.class).getConstraints(ctx, param),
+                     () -> handleHttpError(ctx, 400, "Missing parameter 'modeluri'!"));
+            });
+
             // GET MODELURIS
             get(ModelServerPaths.MODEL_URIS, getController(ModelController.class).getModelUrisHandler());
 
@@ -151,6 +169,28 @@ public class ModelServerRouting extends Routing {
                      .ifPresentOrElse(
                         modeluri -> {
                            if (!getController(SessionController.class).subscribe(ctx, modeluri)) {
+                              handleWsErrorAndCloseSession(ctx, String
+                                 .format("Cannot subscribe to '%s': modeluri is not a valid model resource", modeluri));
+                           }
+                        },
+                        () -> handleWsErrorAndCloseSession(ctx, "Missing parameter 'modeluri'!"));
+               });
+               wsHandler.onClose(ctx -> {
+                  if (!getController(SessionController.class).unsubscribe(ctx)) {
+                     handleWsError(ctx, "Cannot unsubscribe: invalid session");
+                  }
+               });
+               wsHandler.onError(ctx -> ctx.error());
+               wsHandler.onMessage(ctx -> {}); // we do not handle messages from subscribers at the moment
+            });
+
+            ws(ModelServerPaths.VALIDATION_SUBSCRIPTION, wsHandler -> {
+               wsHandler.onConnect(ctx -> {
+                  getQueryParam(ctx.queryParamMap(), "modeluri")
+                     .map(this::adaptModelUri)
+                     .ifPresentOrElse(
+                        modeluri -> {
+                           if (!getController(SessionController.class).subscribeToValidation(ctx, modeluri)) {
                               handleWsErrorAndCloseSession(ctx, String
                                  .format("Cannot subscribe to '%s': modeluri is not a valid model resource", modeluri));
                            }

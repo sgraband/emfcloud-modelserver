@@ -12,6 +12,8 @@ package org.eclipse.emfcloud.modelserver.emf.common;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -24,6 +26,8 @@ import org.apache.log4j.Logger;
 import org.eclipse.emf.common.command.BasicCommandStack;
 import org.eclipse.emf.common.command.Command;
 import org.eclipse.emf.common.notify.AdapterFactory;
+import org.eclipse.emf.common.util.BasicDiagnostic;
+import org.eclipse.emf.common.util.Diagnostic;
 import org.eclipse.emf.common.util.ECollections;
 import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.common.util.TreeIterator;
@@ -33,6 +37,7 @@ import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.resource.ResourceSet;
 import org.eclipse.emf.ecore.resource.impl.ResourceSetImpl;
+import org.eclipse.emf.ecore.util.Diagnostician;
 import org.eclipse.emf.edit.domain.AdapterFactoryEditingDomain;
 import org.eclipse.emf.edit.domain.EditingDomain;
 import org.eclipse.emfcloud.modelserver.command.CCommand;
@@ -59,6 +64,8 @@ public class ModelRepository {
 
    private final ResourceSet resourceSet = new ResourceSetImpl();
    private final EditingDomain domain;
+
+   private BasicDiagnostic validationResult;
 
    @Inject
    public ModelRepository(final AdapterFactory adapterFactory, final ServerConfiguration serverConfiguration,
@@ -217,12 +224,49 @@ public class ModelRepository {
       return this.resourceManager.save(resourceSet);
    }
 
+   // List<List<String>>
+   public BasicDiagnostic validate(final String modeluri) {
+      if (!getModel(modeluri).isEmpty()) {
+         BasicDiagnostic diagnostics = Diagnostician.INSTANCE.createDefaultDiagnostic(getModel(modeluri).get());
+         Diagnostician.INSTANCE.validate(getModel(modeluri).get(), diagnostics,
+            Diagnostician.INSTANCE.createDefaultContext());
+         this.validationResult = diagnostics;
+         return diagnostics;
+      }
+      return null;
+   }
+
    public Set<String> getAllModelUris() {
       Set<String> modeluris = new HashSet<>();
       for (Resource resource : resourceSet.getResources()) {
          modeluris.add(resource.getURI().deresolve(serverConfiguration.getWorkspaceRootURI()).toString());
       }
       return modeluris;
+   }
+
+   public BasicDiagnostic getValidationResult() { return validationResult; }
+
+   public Map<String, Object> diagnosticToJSON(final Diagnostic diagnostic, final Resource res) {
+      Map<String, Object> jsonResult = new HashMap<>();
+      jsonResult.put("message", diagnostic.getMessage());
+      jsonResult.put("severity", diagnostic.getSeverity());
+      List<Map<String, Object>> children = new ArrayList<>();
+      for (Diagnostic child : diagnostic.getChildren()) {
+         children.add(diagnosticToJSON(child, res));
+      }
+      jsonResult.put("children", children);
+      jsonResult.put("code", diagnostic.getCode());
+      jsonResult.put("data", diagnostic.getData());
+      jsonResult.put("exception", diagnostic.getException());
+      jsonResult.put("source", diagnostic.getSource());
+      Optional<EObject> eObject = diagnostic.getData().stream()
+         .filter(EObject.class::isInstance)
+         .map(EObject.class::cast)
+         .findFirst();
+      if (eObject.isPresent()) {
+         jsonResult.put("id", res.getURIFragment((eObject.get())));
+      }
+      return jsonResult;
    }
 
    ResourceSet getResourceSet() { return resourceSet; }

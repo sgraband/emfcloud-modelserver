@@ -66,6 +66,7 @@ public class ModelServerClient implements ModelServerClientApi<EObject>, ModelSe
    private final OkHttpClient client;
    private final String baseUrl;
    private final Map<String, WebSocket> openSockets = new LinkedHashMap<>();
+   private final Map<String, WebSocket> openValidationSockets = new LinkedHashMap<>();
    private final Map<EditingContextImpl, WebSocket> openEditingSockets = new LinkedHashMap<>();
 
    public ModelServerClient(final String baseUrl) throws MalformedURLException {
@@ -318,6 +319,18 @@ public class ModelServerClient implements ModelServerClientApi<EObject>, ModelSe
    }
 
    @Override
+   public CompletableFuture<Response<String>> validate(final String modelUri) {
+      final Request request = new Request.Builder()
+         .url(
+            createHttpUrlBuilder(makeUrl(VALIDATION))
+               .addQueryParameter("modeluri", modelUri)
+               .build())
+         .build();
+
+      return makeCall(request);
+   }
+
+   @Override
    public CompletableFuture<Response<String>> getTypeSchema(final String modelUri) {
       final Request request = new Request.Builder()
          .url(
@@ -465,8 +478,66 @@ public class ModelServerClient implements ModelServerClientApi<EObject>, ModelSe
    }
 
    @Override
+   public void validationSubscribe(final String modelUri, final SubscriptionListener subscriptionListener) {
+      Request request = new Request.Builder()
+         .url(
+            makeWsUrl(
+               createHttpUrlBuilder(makeUrl(VALIDATION_SUBSCRIPTION))
+                  .addQueryParameter("modeluri", modelUri)
+                  .build()
+                  .toString()))
+         .build();
+
+      @SuppressWarnings({ "checkstyle:AnonInnerLength" })
+      final WebSocket socket = client.newWebSocket(request, new WebSocketListener() {
+         @Override
+         public void onOpen(@NotNull final WebSocket webSocket, @NotNull final okhttp3.Response response) {
+            subscriptionListener.onOpen(new Response<>(response,
+               body -> require(Optional.ofNullable(body))));
+         }
+
+         @Override
+         public void onMessage(@NotNull final WebSocket webSocket, @NotNull final String text) {
+            Optional<String> type = ModelServerClient.this.parseJsonField(text, "type");
+            Optional<String> data = ModelServerClient.this.parseJsonField(text, "data");
+            subscriptionListener.onNotification(new ModelServerNotification(type.orElse("unknown"), data));
+         }
+
+         @Override
+         public void onClosing(@NotNull final WebSocket webSocket, final int code, @NotNull final String reason) {
+            subscriptionListener.onClosing(code, reason);
+         }
+
+         @Override
+         public void onClosed(@NotNull final WebSocket webSocket, final int code, @NotNull final String reason) {
+            subscriptionListener.onClosed(code, reason);
+         }
+
+         @Override
+         public void onFailure(@NotNull final WebSocket webSocket, @NotNull final Throwable t,
+            @Nullable final okhttp3.Response response) {
+            if (response != null) {
+               subscriptionListener.onFailure(t, new Response<>(response));
+            } else {
+               subscriptionListener.onFailure(t);
+            }
+         }
+      });
+      openValidationSockets.put(modelUri, socket);
+   }
+
+   @Override
    public boolean unsubscribe(final String modelUri) {
       final WebSocket webSocket = openSockets.get(modelUri);
+      if (webSocket != null) {
+         return webSocket.close(1000, "Websocket closed by client.");
+      }
+      return false;
+   }
+
+   @Override
+   public boolean unsubscribeValidation(final String modelUri) {
+      final WebSocket webSocket = openValidationSockets.get(modelUri);
       if (webSocket != null) {
          return webSocket.close(1000, "Websocket closed by client.");
       }
@@ -592,5 +663,17 @@ public class ModelServerClient implements ModelServerClientApi<EObject>, ModelSe
          }
       }
       return false;
+   }
+
+   @Override
+   public CompletableFuture<Response<String>> getConstraints(final String modelUri) {
+      final Request request = new Request.Builder()
+         .url(
+            createHttpUrlBuilder(makeUrl(VALIDATION_CONSTRAINTS))
+               .addQueryParameter("modeluri", modelUri)
+               .build())
+         .build();
+
+      return makeCall(request);
    }
 }

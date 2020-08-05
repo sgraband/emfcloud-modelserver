@@ -11,15 +11,25 @@
 package org.eclipse.emfcloud.modelserver.emf.common;
 
 import java.io.IOException;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 import org.apache.log4j.Logger;
+import org.eclipse.emf.common.util.BasicDiagnostic;
 import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.EAttribute;
+import org.eclipse.emf.ecore.EClass;
+import org.eclipse.emf.ecore.EClassifier;
+import org.eclipse.emf.ecore.EDataType;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EPackage;
+import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.resource.impl.ResourceImpl;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.emf.ecore.util.ExtendedMetaData;
 import org.eclipse.emfcloud.modelserver.command.CCommand;
 import org.eclipse.emfcloud.modelserver.common.codecs.DecodingException;
 import org.eclipse.emfcloud.modelserver.common.codecs.EMFJsonConverter;
@@ -27,8 +37,10 @@ import org.eclipse.emfcloud.modelserver.common.codecs.EncodingException;
 import org.eclipse.emfcloud.modelserver.emf.common.codecs.Codecs;
 import org.eclipse.emfcloud.modelserver.emf.common.codecs.JsonCodec;
 import org.eclipse.emfcloud.modelserver.emf.configuration.ServerConfiguration;
+import org.emfjson.jackson.module.EMFModule;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.Maps;
 import com.google.inject.Inject;
 
@@ -158,6 +170,7 @@ public class ModelController {
                } catch (EncodingException e) {
                   handleEncodingError(ctx, e);
                }
+               this.modelRepository.validate(modeluri);
                sessionController.modelChanged(modeluri);
             },
                () -> handleError(ctx, 404, "No such model resource to update")),
@@ -171,6 +184,67 @@ public class ModelController {
       } else {
          handleError(ctx, 500, "Saving model '" + modeluri + "' failed!");
       }
+   }
+
+   public void validate(final Context ctx, final String modeluri) {
+      ObjectMapper mapper = EMFModule.setupDefaultMapper();
+      BasicDiagnostic result = this.modelRepository.validate(modeluri);
+      Resource res = this.modelRepository.loadResource(modeluri).get();
+      ctx.json(JsonResponse.validationResult(mapper.valueToTree(this.modelRepository.diagnosticToJSON(result, res))));
+   }
+
+   public void getConstraints(final Context ctx, final String modeluri) {
+      Map<Integer, Map<Integer, Map<String, Object>>> jsonResult = new HashMap<>();
+      ObjectMapper mapper = EMFModule.setupDefaultMapper();
+      Optional<EObject> eObject = this.modelRepository.getModel(modeluri);
+      if (eObject.isPresent()) {
+         EPackage ePackage = eObject.get().eClass().getEPackage();
+         for (EClassifier e : ePackage.getEClassifiers()) {
+            if (e instanceof EClass) {
+               // Map Feature -> ExtendedMetaData
+               Map<Integer, Map<String, Object>> featureMap = new HashMap();
+               for (EStructuralFeature esf : ((EClass) e).getEStructuralFeatures()) {
+                  if (esf instanceof EAttribute) {
+                     EDataType dataType = ((EAttribute) esf).getEAttributeType();
+                     // Map facet -> Value
+                     Map<String, Object> facetMap = new HashMap();
+
+                     int whiteSpace = ExtendedMetaData.INSTANCE.getWhiteSpaceFacet(dataType);
+                     facetMap.put("whiteSpace", whiteSpace);
+                     List<String> enumeration = ExtendedMetaData.INSTANCE.getEnumerationFacet(dataType);
+                     facetMap.put("enumeration", enumeration);
+                     List<String> pattern = ExtendedMetaData.INSTANCE.getPatternFacet(dataType);
+                     facetMap.put("pattern", pattern);
+                     int totalDigits = ExtendedMetaData.INSTANCE.getTotalDigitsFacet(dataType);
+                     facetMap.put("totalDigits", totalDigits);
+                     int fractionDigits = ExtendedMetaData.INSTANCE.getFractionDigitsFacet(dataType);
+                     facetMap.put("fractionDigits", fractionDigits);
+                     int length = ExtendedMetaData.INSTANCE.getLengthFacet(dataType);
+                     facetMap.put("length", length);
+                     int minLength = ExtendedMetaData.INSTANCE.getMinLengthFacet(dataType);
+                     facetMap.put("minLength", minLength);
+                     int maxLength = ExtendedMetaData.INSTANCE.getMaxLengthFacet(dataType);
+                     facetMap.put("maxLength", maxLength);
+                     String minExclusive = ExtendedMetaData.INSTANCE.getMinExclusiveFacet(dataType);
+                     facetMap.put("minExclusive", minExclusive);
+                     String maxExclusive = ExtendedMetaData.INSTANCE.getMaxExclusiveFacet(dataType);
+                     facetMap.put("maxExclusive", maxExclusive);
+                     String minInclusive = ExtendedMetaData.INSTANCE.getMinInclusiveFacet(dataType);
+                     facetMap.put("minInclusive", minInclusive);
+                     String maxInclusive = ExtendedMetaData.INSTANCE.getMaxInclusiveFacet(dataType);
+                     facetMap.put("maxInclusive", maxInclusive);
+
+                     featureMap.put(esf.getFeatureID(), facetMap);
+                  }
+               }
+               // Map Class -> Features
+               if (!featureMap.isEmpty()) {
+                  jsonResult.put(e.getClassifierID(), featureMap);
+               }
+            }
+         }
+      }
+      ctx.json(JsonResponse.success(mapper.valueToTree(jsonResult)));
    }
 
    private final Handler modelUrisHandler = ctx -> ctx
